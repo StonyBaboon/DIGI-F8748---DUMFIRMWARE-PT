@@ -1,4 +1,4 @@
-﻿# =============================================================================
+# =============================================================================
 #  digi-f8748.ps1 - DIGI F8748 Admin Recovery para Windows (PowerShell 5.1+)
 # =============================================================================
 #  El recuperador de la contrasena de administrador para routers ZTE F8748
@@ -43,7 +43,7 @@ $PARAM_DEVICES = @("/dev/mtd1", "/dev/mtd2", "/dev/mtd3", "/dev/mtd4", "/dev/mtd
 $DUMP_WINDOWS = @(0x980000, 0x9C0000, 0xA00000, 0xA40000, 0xA80000, 0x900000,
                   0x940000, 0xAC0000, 0xB00000, 0x800000, 0x880000)
 
-$Host_ = ""; $HostProvided = $false; $WebU = ""; $WebP = ""; $CRand = 0
+$Host_ = "192.168.1.1"; $WebU = "user"; $WebP = "user"; $CRand = 0
 $RMac = ""; $CMac = ""; $OutDir = "digi-dump"; $VUser = ""; $VPass = ""; $VidOverride = ""
 
 function Banner {
@@ -55,7 +55,6 @@ function Banner {
   Write-Host "|____/___\____|___|"
   Write-Host "  ZTE F8748 (Digi) - ADMIN RECOVERY - solo uso autorizado"
   Write-Host "        digi-f8748 $VERSION - $(Get-Date -Format 'yyyy-MM-dd HH:mm')"
-  if ($Host_) { Write-Host "        Router: $Host_" }
 }
 
 function Die([string]$m) { Write-Host "[x] $m" -ForegroundColor Red; exit 1 }
@@ -142,94 +141,29 @@ function GetString([string]$url) {
   [System.Text.Encoding]::UTF8.GetString($read.Result)
 }
 
-function Test-RouterWeb([string]$routerHost) {
-  $probeClient = [System.Net.Http.HttpClient]::new()
-  $probeClient.Timeout = [TimeSpan]::FromSeconds(3)
-  try {
-    $probeResponse = $probeClient.GetAsync("http://$routerHost/").GetAwaiter().GetResult()
-    $probeResponse.Dispose()
-    return $true
-  } catch { return $false }
-  finally { $probeClient.Dispose() }
-}
-
-function Resolve-RouterHost {
-  if ($HostProvided) {
-    if ($Host_ -notmatch '^[A-Za-z0-9.\-]{1,253}$') { Die "direccion de router no valida: $Host_" }
-    return
-  }
-
-  $gateway = $null
-  try {
-    $route = Get-NetRoute -AddressFamily IPv4 -DestinationPrefix '0.0.0.0/0' -ErrorAction Stop |
-      Where-Object { $_.NextHop -and $_.NextHop -ne '0.0.0.0' } |
-      Sort-Object RouteMetric, InterfaceMetric |
-      Select-Object -First 1
-    if ($route) { $gateway = [string]$route.NextHop }
-  } catch { }
-
-  if ($gateway) {
-    try {
-      if (-not (Test-RouterWeb $gateway)) { throw "HTTP probe failed" }
-      $script:Host_ = $gateway
-      Log "[*] Router detectado en la puerta de enlace: $Host_"
-      return
-    } catch {
-      Log "[!] La puerta de enlace $gateway no responde por HTTP."
-    }
-  } else {
-    Log "[!] No se detecto una puerta de enlace IPv4 predeterminada."
-  }
-
-  $prompt = if ($gateway) { "Direccion IP o nombre del router (puerta de enlace $gateway)" } else { "Direccion IP o nombre del router" }
-  try { $script:Host_ = (Read-Host $prompt).Trim() } catch { Die "no se pudo leer la direccion del router; pasa --host <direccion>" }
-  if (-not $Host_) { Die "falta la direccion del router; pasa --host <direccion>" }
-  if ($Host_ -notmatch '^[A-Za-z0-9.\-]{1,253}$') { Die "direccion de router no valida: $Host_" }
-}
-
 # --------------------------------- MACs --------------------------------------
 function CleanMac([string]$s) { ($s -replace '[:\-]', '').ToLower() }
-function Get-RouteInterface {
-  $udp = $null
-  try {
-    $udp = New-Object System.Net.Sockets.UdpClient
-    $udp.Connect($Host_, 80)
-    $localIp = $udp.Client.LocalEndPoint.Address
+function ResolveMacs {
+  if (-not $RMac) {
+    try {
+      $null = New-Object System.Net.NetworkInformation.Ping
+      $p = (New-Object System.Net.NetworkInformation.Ping).Send($Host_, 1000)
+      if ($p.Status -eq 'Success') { $RMac = ($p.MacAddress.ToString() -replace '-', '') }
+    } catch { }
+  }
+  if (-not $CMac) {
     foreach ($nic in [System.Net.NetworkInformation.NetworkInterface]::GetAllNetworkInterfaces()) {
-      if ($nic.OperationalStatus -ne 'Up') { continue }
       foreach ($ip in $nic.GetIPProperties().UnicastAddresses) {
-        if ($ip.Address.AddressFamily -eq 'InterNetwork' -and $ip.Address.Equals($localIp)) { return $nic }
+        if ($ip.Address.AddressFamily -eq 'InterNetwork' -and $ip.Address.ToString() -like "192.168.*") {
+          $m = $nic.GetPhysicalAddress().ToString().ToLower()
+          if ($m -and $m -ne '020000000000' -and $m -ne '000000000000') { $CMac = $m }
+        }
       }
     }
-  } catch { }
-  finally { if ($udp) { $udp.Dispose() } }
-  return $null
-}
-function Get-ClientMac([System.Net.NetworkInformation.NetworkInterface]$nic) {
-  if (-not $nic) { return '' }
-  $mac = CleanMac $nic.GetPhysicalAddress().ToString()
-  if ($mac -match '^[0-9a-f]{12}$' -and $mac -notin @('020000000000', '000000000000')) { return $mac }
-  return ''
-}
-function Get-RouterMac([System.Net.NetworkInformation.NetworkInterface]$nic) {
-  if (-not $nic) { return '' }
-  try {
-    $ifIndex = $nic.GetIPProperties().GetIPv4Properties().Index
-    $neighbors = Get-NetNeighbor -IPAddress $Host_ -InterfaceIndex $ifIndex -ErrorAction Stop
-    foreach ($neighbor in $neighbors) {
-      $mac = CleanMac $neighbor.LinkLayerAddress
-      if ($neighbor.State -notin @('Incomplete', 'Unreachable') -and $mac -match '^[0-9a-f]{12}$' -and $mac -ne '000000000000') { return $mac }
-    }
-  } catch { }
-  return ''
-}
-function ResolveMacs {
-  $nic = Get-RouteInterface
-  if (-not $RMac) { $RMac = Get-RouterMac $nic }
-  if (-not $CMac) { $CMac = Get-ClientMac $nic }
+  }
   $RMac = CleanMac $RMac; $CMac = CleanMac $CMac
-  if ($RMac -notmatch '^[0-9a-f]{12}$') { Die "Router MAC desconocida - pasa --router-mac aa:bb:cc:dd:ee:ff" }
-  if ($CMac -notmatch '^[0-9a-f]{12}$') { Die "Client MAC desconocida - pasa --client-mac aa:bb:cc:dd:ee:ff" }
+  if ($RMac -notmatch '^[0-9a-f]{12}$') { Die "Router MAC desconocida - pasa -RouterMac aa:bb:cc:dd:ee:ff" }
+  if ($CMac -notmatch '^[0-9a-f]{12}$') { Die "Client MAC desconocida - pasa -ClientMac aa:bb:cc:dd:ee:ff" }
   $script:RMac = $RMac; $script:CMac = $CMac
   Log "[*] Router MAC (br0): $RMac"
   Log "[*] Client MAC:       $CMac"
@@ -282,61 +216,7 @@ function Invoke-FactoryMode([int]$mode) {
   throw "FactoryMode no devolvio credenciales (fallo la prueba de MACs?)"
 }
 
-function Test-FactorySshClosed([int]$waitSeconds = 6) {
-  $deadline = [DateTime]::UtcNow.AddSeconds($waitSeconds)
-  do {
-    $client = [System.Net.Sockets.TcpClient]::new()
-    try {
-      $connect = $client.BeginConnect($Host_, 22, $null, $null)
-      if ($connect.AsyncWaitHandle.WaitOne(500)) {
-        try { $client.EndConnect($connect); return $false }
-        catch [System.Net.Sockets.SocketException] {
-          if ($_.Exception.SocketErrorCode -eq [System.Net.Sockets.SocketError]::ConnectionRefused) { return $true }
-        }
-      }
-    } catch { }
-    finally { $client.Dispose() }
-    Start-Sleep -Milliseconds 300
-  } while ([DateTime]::UtcNow -lt $deadline)
-
-  # Some routers silently drop port 22 instead of refusing the connection.
-  # Treat that as unavailable only when the router still answers on HTTP.
-  try {
-    $cancel = [System.Threading.CancellationTokenSource]::new([TimeSpan]::FromSeconds(3))
-    try {
-      $response = $script:http.GetAsync("http://$Host_/", $cancel.Token).GetAwaiter().GetResult()
-      $response.Dispose()
-      return $true
-    } finally { $cancel.Dispose() }
-  } catch { }
-  return $false
-}
-
-function Close-FactorySsh([int]$attempts = 3) {
-  for ($attempt = 1; $attempt -le $attempts; $attempt++) {
-    try {
-      $script:http.Dispose()
-      $script:http = [System.Net.Http.HttpClient]::new()
-      $script:http.Timeout = [TimeSpan]::FromSeconds(15)
-      [void]$script:http.DefaultRequestHeaders.TryAddWithoutValidation("User-Agent", "Mozilla/5.0")
-      Invoke-WfInit
-      Invoke-WfProof
-      Invoke-WfLogin
-      $null = Invoke-FactoryMode 0
-    } catch { Log "[!] intento de desarme $attempt/$attempts fallo: $($_.Exception.Message)" }
-
-    if (Test-FactorySshClosed) {
-      Log "[+] factory SSH cerrado (TCP/22 no accesible)"
-      return $true
-    }
-    Log "[!] factory SSH sigue accesible tras el intento $attempt/$attempts"
-  }
-  Log "[x] no se pudo confirmar el cierre de factory SSH; ejecuta 'disarm' o reinicia el router"
-  return $false
-}
-
 function Invoke-ArmWithRetries([int]$attempts = 3) {
-  Ensure-WebCredentials
   ResolveMacs
   for ($i = 1; $i -le $attempts; $i++) {
     try {
@@ -557,11 +437,13 @@ function Cmd-Info {
   Log ("modelo: " + ($models -join " "))
   $tm = [regex]::Match($html, '<title>(.*?)</title>', 'Singleline')
   if ($tm.Success) { Log ("titulo: " + [System.Net.WebUtility]::HtmlDecode($tm.Groups[1].Value).Trim()) }
-  $nic = Get-RouteInterface
-  $routerMac = if ($RMac) { CleanMac $RMac } else { Get-RouterMac $nic }
-  $clientMac = if ($CMac) { CleanMac $CMac } else { Get-ClientMac $nic }
-  Log "[*] Router MAC (br0): $(if ($routerMac) { $routerMac } else { '?' })"
-  Log "[*] Client MAC:       $(if ($clientMac) { $clientMac } else { '?' })"
+  foreach ($nic in [System.Net.NetworkInformation.NetworkInterface]::GetAllNetworkInterfaces()) {
+    foreach ($ip in $nic.GetIPProperties().UnicastAddresses) {
+      if ($ip.Address.AddressFamily -eq 'InterNetwork' -and $ip.Address.ToString() -like "192.168.*") {
+        Log "tu IP/MAC ($($nic.Name)): $($ip.Address) / $($nic.GetPhysicalAddress())"
+      }
+    }
+  }
   Log "[i] Router MAC = pegatina; Client MAC = la de tu equipo en la lista del router"
 }
 
@@ -603,15 +485,15 @@ function Cmd-Arm {
   if ($Keep) {
     Log "[i] -Keep: dejando el SSH abierto (recuerda desarmar)"
   } else {
-    Start-Sleep -Seconds 1
-    $null = Close-FactorySsh
+    Start-Sleep -Seconds 1; Invoke-WfInit; Invoke-WfProof; Invoke-WfLogin; $null = Invoke-FactoryMode 0
+    Log "[+] factory SSH desarmado"
   }
 }
 
 function Cmd-Disarm {
-  Ensure-WebCredentials
-  ResolveMacs
-  if (-not (Close-FactorySsh)) { Die "no se pudo confirmar el cierre de factory SSH" }
+  ResolveMacs; Invoke-WfInit; Invoke-WfProof; Invoke-WfLogin
+  $null = Invoke-FactoryMode 0
+  Log "[+] factory SSH desarmado"
 }
 
 function Cmd-Dump {
@@ -623,50 +505,32 @@ function Cmd-Dump {
   finally {
     if (-not $Keep) {
       Log "[*] desarmando factory SSH..."
-      $null = Close-FactorySsh
+      try { Invoke-WfInit; Invoke-WfProof; Invoke-WfLogin; $null = Invoke-FactoryMode 0; Log "[+] desarmado" }
+      catch { Log "[!] disarm fallo - reinicia el router si el puerto 22 sigue abierto" }
     }
   }
 }
 
 function Cmd-Decrypt { Get-Credentials $OutDir | Out-Null }
 
-function Test-WebLogin([string]$username, [string]$password) {
-  $j = (GetString "http://$Host_/?_type=loginData&_tag=login_entry") | ConvertFrom-Json
-  $token = $j.sess_token
-  if ($j.lockingTime -and [int]$j.lockingTime -gt 0) { throw "login bloqueado (lockingTime=$($j.lockingTime))" }
-  $xml = GetString "http://$Host_/?_type=loginData&_tag=login_token"
-  $salt = [regex]::Match($xml, '>([^<]+)</').Groups[1].Value.Trim()
-  if (-not $salt) { throw "no se obtuvo salt" }
-  $hash = Sha256Hex ([System.Text.Encoding]::UTF8.GetBytes("$password$salt"))
-  $form = "action=login&Username=$([Uri]::EscapeDataString($username))&Password=$hash&_sessionTOKEN=$([Uri]::EscapeDataString([string]$token))"
-  $content = [System.Net.Http.StringContent]::new($form, [System.Text.Encoding]::UTF8, "application/x-www-form-urlencoded")
-  $resp = $http.PostAsync("http://$Host_/?_type=loginData&_tag=login_entry", $content)
-  if (-not $resp.Wait([TimeSpan]::FromSeconds(15))) { throw "timeout POST login_entry" }
-  $body = $resp.Result.Content.ReadAsStringAsync().GetAwaiter().GetResult()
-  if ($body -match 'loginErrMsg":"([^"]+)') { throw "login rechazado: $($Matches[1])" }
-  $html = GetString "http://$Host_/"
-  if ($html -match 'curRight\s*=\s*"1"') { return $true }
-  throw "login no confirmado (curRight distinto de 1)"
-}
-
-function Ensure-WebCredentials {
-  if (-not $script:WebU) { $script:WebU = Read-Host "Usuario web normal del router" }
-  if (-not $script:WebP) {
-    $secure = Read-Host "Contraseña web normal del router" -AsSecureString
-    $ptr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure)
-    try { $script:WebP = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($ptr) }
-    finally { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($ptr) }
-  }
-  if (-not $script:WebU -or -not $script:WebP) { Die "se necesitan usuario y contraseña web normal" }
-  try { $null = Test-WebLogin $script:WebU $script:WebP }
-  catch { Die "login web normal rechazado antes de FactoryMode: $($_.Exception.Message)" }
-  Log "[+] login web normal confirmado"
-}
-
 function Cmd-Verify {
   if (-not $VUser -or -not $VPass) { Die "verify necesita -VUser usuario -VPass password" }
-  try { $null = Test-WebLogin $VUser $VPass; Log "[+] login admin web confirmado (curRight=1)" }
-  catch { Log "[!] login NO confirmado: $($_.Exception.Message)" }
+  $j = (GetString "http://$Host_/?_type=loginData&_tag=login_entry") | ConvertFrom-Json
+  $token = $j.sess_token
+  if ($j.lockingTime -and [int]$j.lockingTime -gt 0) { Die "login bloqueado (lockingTime=$($j.lockingTime))" }
+  $xml = GetString "http://$Host_/?_type=loginData&_tag=login_token"
+  $salt = [regex]::Match($xml, '>([^<]+)</').Groups[1].Value.Trim()
+  if (-not $salt) { Die "no se obtuvo salt" }
+  $hash = Sha256Hex ([System.Text.Encoding]::UTF8.GetBytes("$VPass$salt"))
+  $form = "action=login&Username=$([Uri]::EscapeDataString($VUser))&Password=$hash&_sessionTOKEN=$([Uri]::EscapeDataString([string]$token))"
+  $content = [System.Net.Http.StringContent]::new($form, [System.Text.Encoding]::UTF8, "application/x-www-form-urlencoded")
+  $resp = $http.PostAsync("http://$Host_/?_type=loginData&_tag=login_entry", $content)
+  $null = $resp.Wait([TimeSpan]::FromSeconds(15))
+  $body = $resp.Result.Content.ReadAsStringAsync().GetAwaiter().GetResult()
+  if ($body -match 'loginErrMsg":"([^"]+)') { Die "login rechazado: $($Matches[1])" }
+  $html = GetString "http://$Host_/"
+  if ($html -match 'curRight\s*=\s*"1"') { Log "[+] login admin web confirmado (curRight=1)" }
+  else { Log "[!] login NO confirmado" }
 }
 
 function Cmd-Recover {
@@ -683,7 +547,8 @@ function Cmd-Recover {
     }
   } finally {
     Log "[*] cerrando acceso temporal..."
-    $null = Close-FactorySsh
+    try { Invoke-WfInit; Invoke-WfProof; Invoke-WfLogin; $null = Invoke-FactoryMode 0; Log "[+] factory SSH desarmado" }
+    catch { Log "[!] disarm fallo - reinicia el router si el puerto 22 sigue abierto" }
   }
 }
 
@@ -692,7 +557,7 @@ $Cmd = $args[0]; if ($args.Count -gt 0) { $null = $args | Select-Object -First 1
 $i = 1
 while ($i -lt $args.Count) {
   switch -Regex ($args[$i]) {
-    '^(-H|--host)$' { $Host_ = $args[$i + 1]; $HostProvided = $true; $i += 2; continue }
+    '^(-H|--host)$' { $Host_ = $args[$i + 1]; $i += 2; continue }
     '^--web-user$' { $WebU = $args[$i + 1]; $i += 2; continue }
     '^--web-pass$' { $WebP = $args[$i + 1]; $i += 2; continue }
     '^--client-rand$' { $CRand = [long]$args[$i + 1]; $i += 2; continue }
@@ -709,7 +574,6 @@ while ($i -lt $args.Count) {
   }
 }
 
-if ($Cmd -in @('info', 'handshake', 'arm', 'dump', 'verify', 'disarm', 'recover')) { Resolve-RouterHost }
 Banner
 switch ($Cmd) {
   "info" { Cmd-Info }

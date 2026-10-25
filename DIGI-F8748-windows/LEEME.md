@@ -134,19 +134,8 @@ También funciona el script `.sh` dentro de WSL (Ubuntu en Windows).
 | `disarm` | Cierra el acceso de diagnóstico | Sí (lo cierra) |
 | `recover` | Todo el proceso completo, de principio a fin | Sí (ídem) |
 
-En Windows, el programa prueba la puerta de enlace IPv4 predeterminada y usa
-su dirección si la interfaz web responde. Si no puede detectarla o alcanzarla,
-te pide la dirección del router. Puedes indicar `--host` para elegirla
-directamente, por ejemplo `--host 10.20.30.1`.
-
-Salvo que se use `--keep-ssh`, al terminar `recover`, `dump` o `arm` el
-programa abre una sesión web nueva para cerrar el acceso temporal y comprueba
-que TCP/22 ya no responde. Si no puede confirmar el cierre, lo indicará
-claramente: ejecuta `disarm` y, si el router sigue inaccesible, reinícialo.
-
-Opciones: `--host` (IP o nombre del router), `--web-user` / `--web-pass` (login normal,
-necesario en `arm`, `dump`, `recover` y `disarm`; si se omite se solicita y
-valida antes de FactoryMode), `--router-mac` / `--client-mac`, `--out` (salida),
+Opciones: `--host` (IP del router), `--web-user` / `--web-pass` (tu login
+normal), `--router-mac` / `--client-mac`, `--out` (carpeta de salida),
 `--keep-ssh` (no recomendado).
 
 ## Qué obtienes
@@ -164,7 +153,7 @@ fábrica. Con ellos puedes:
 ## Requisitos
 
 - Estar conectado a la red del router (Wi-Fi o cable).
-- Las credenciales actuales del login web normal del router.
+- El login web normal del router (habitualmente `user` / `user`).
 - Varios minutos sin interrumpir el proceso.
 
 ## Preguntas frecuentes
